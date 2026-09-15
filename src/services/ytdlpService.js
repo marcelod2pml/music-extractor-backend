@@ -181,6 +181,33 @@ try {
   console.warn('[ytdlpService] Aviso ao inicializar pasta de cache temporário:', e.message);
 }
 
+// Localiza arquivo de cookies se configurado (Render Secret File /etc/secrets/cookies.txt ou env YTDLP_COOKIES)
+function getCookieArgs() {
+  const secretPath = '/etc/secrets/cookies.txt';
+  if (fs.existsSync(secretPath)) {
+    console.log('[ytdlpService] Usando cookies do Render Secret File:', secretPath);
+    return ['--cookies', secretPath];
+  }
+  const rootCookie = path.join(__dirname, '../../cookies.txt');
+  if (fs.existsSync(rootCookie)) {
+    console.log('[ytdlpService] Usando cookies locais da raiz:', rootCookie);
+    return ['--cookies', rootCookie];
+  }
+  if (process.env.YTDLP_COOKIES && process.env.YTDLP_COOKIES.trim().length > 10) {
+    const tmpCookiePath = path.join(os.tmpdir(), 'yt_cookies.txt');
+    try {
+      fs.writeFileSync(tmpCookiePath, process.env.YTDLP_COOKIES.trim(), 'utf-8');
+      console.log('[ytdlpService] Usando cookies da variável de ambiente YTDLP_COOKIES');
+      return ['--cookies', tmpCookiePath];
+    } catch (e) {}
+  }
+  return [];
+}
+
+function hasCookies() {
+  return getCookieArgs().length > 0;
+}
+
 // Mapa para gerenciar requisições simultâneas para o mesmo vídeo
 const inFlightDownloads = new Map();
 
@@ -194,10 +221,10 @@ function pruneCacheIfNeeded() {
       }).sort((a, b) => a.time - b.time);
 
       for (let i = 0; i < 15; i++) {
-        try { fs.unlinkSync(fileStats[i].path); } catch (e) {}
+        try { fs.unlinkSync(fileStats[i].path); } catch (e) { }
       }
     }
-  } catch (e) {}
+  } catch (e) { }
 }
 
 /**
@@ -230,9 +257,9 @@ async function streamAudio(rawId, res) {
       if (stat.size > 10240) {
         return sendCachedFile();
       } else {
-        try { fs.unlinkSync(cachedFile); } catch (e) {}
+        try { fs.unlinkSync(cachedFile); } catch (e) { }
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   // 2. Se já existe uma extração em andamento para este mesmo videoId, aguarda
@@ -257,6 +284,7 @@ async function streamAudio(rawId, res) {
     const args = [
       '--no-warnings',
       '--no-playlist',
+      ...getCookieArgs(),
       '--js-runtimes', 'node',
       '--extractor-args', 'youtube:player_client=android,web',
       '-x',
@@ -340,4 +368,5 @@ module.exports = {
   getVideoInfo,
   streamAudio,
   checkHealth,
+  hasCookies,
 };

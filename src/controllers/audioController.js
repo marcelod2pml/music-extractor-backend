@@ -89,7 +89,8 @@ async function health(req, res) {
 
     return res.status(isHealthy ? 200 : 503).json({
       status: isHealthy ? 'healthy' : 'degraded',
-      version: '2.2.0-extractor-android',
+      version: '2.3.0-cookies-enabled',
+      cookiesConfigured: ytdlpService.hasCookies(),
       timestamp: new Date().toISOString(),
       dependencies: status,
     });
@@ -126,7 +127,7 @@ async function debugDownload(req, res) {
   ytdlp.stderr.on('data', (d) => (ytdlpErr += d.toString()));
 
   const timeout = setTimeout(() => {
-    try { ytdlp.kill(); } catch (e) {}
+    try { ytdlp.kill(); } catch (e) { }
     res.json({ status: 'timeout', client: clientArg, ytdlpOut, ytdlpErr: ytdlpErr.slice(-3000) });
   }, 20000);
 
