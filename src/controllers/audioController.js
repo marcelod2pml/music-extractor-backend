@@ -101,7 +101,7 @@ async function health(req, res) {
 
 /**
  * Endpoint de diagnóstico de download
- * GET /api/debug-download?id={videoId}
+ * GET /api/debug-download?id={videoId}&client={web|android|tv|ios}
  */
 async function debugDownload(req, res) {
   const { spawn } = require('child_process');
@@ -112,13 +112,18 @@ async function debugDownload(req, res) {
   let ytdlpOut = '';
   let ytdlpErr = '';
 
-  const clientArg = client || 'android';
+  const cookieArgs = ytdlpService.getCookieArgs ? ytdlpService.getCookieArgs() : [];
+  const nodeBin = process.execPath || 'node';
+  const clientArg = client || (cookieArgs.length > 0 ? 'web,tv' : 'android');
   const args = [
     '-v',
     '--no-playlist',
+    '--force-ipv4',
+    ...cookieArgs,
+    '--js-runtimes', `node:${nodeBin}`,
     '--extractor-args', `youtube:player_client=${clientArg}`,
     '-g',
-    '-f', 'bestaudio/ba/b',
+    '-f', 'ba/ba*/18/bestaudio/best',
     url,
   ];
 
@@ -129,7 +134,7 @@ async function debugDownload(req, res) {
   const timeout = setTimeout(() => {
     try { ytdlp.kill(); } catch (e) { }
     res.json({ status: 'timeout', client: clientArg, ytdlpOut, ytdlpErr: ytdlpErr.slice(-3000) });
-  }, 20000);
+  }, 25000);
 
   ytdlp.on('close', (code) => {
     clearTimeout(timeout);
@@ -137,6 +142,7 @@ async function debugDownload(req, res) {
       status: 'closed',
       code,
       client: clientArg,
+      hasCookies: cookieArgs.length > 0,
       ytdlpOut,
       ytdlpErr: ytdlpErr.slice(-3000),
     });
