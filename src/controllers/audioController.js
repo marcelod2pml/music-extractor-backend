@@ -95,6 +95,8 @@ async function health(req, res) {
   } catch (err) {
     return res.status(500).json({ status: 'error', error: err.message });
   }
+}
+
 /**
  * Endpoint de diagnóstico de download
  * GET /api/debug-download?id={videoId}
