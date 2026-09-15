@@ -89,7 +89,7 @@ async function health(req, res) {
 
     return res.status(isHealthy ? 200 : 503).json({
       status: isHealthy ? 'healthy' : 'degraded',
-      version: '2.3.0-cookies-enabled',
+      version: '2.4.0-quickjs-ejs',
       cookiesConfigured: ytdlpService.hasCookies(),
       timestamp: new Date().toISOString(),
       dependencies: status,

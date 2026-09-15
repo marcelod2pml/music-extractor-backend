@@ -1,10 +1,10 @@
 FROM node:20-alpine
 
-# Instala dependências do sistema: Python, FFmpeg e pip
-RUN apk add --no-cache python3 py3-pip ffmpeg
+# Instala dependências do sistema: Python, FFmpeg, pip e quickjs (JS runtime ultrarrápido)
+RUN apk add --no-cache python3 py3-pip ffmpeg quickjs
 
-# Instala yt-dlp atualizado via pip
-RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
+# Instala yt-dlp e yt-dlp-ejs (provedor oficial de scripts para desafios JS do YouTube)
+RUN pip3 install --no-cache-dir --break-system-packages yt-dlp yt-dlp-ejs
 
 WORKDIR /app
 
