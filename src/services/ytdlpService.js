@@ -288,13 +288,14 @@ async function streamAudio(rawId, res) {
 
   const downloadPromise = new Promise((resolve, reject) => {
     const cookieArgs = getCookieArgs();
+    const nodeBin = process.execPath || 'node';
     const args = [
       '--no-warnings',
       '--no-playlist',
+      '--force-ipv4',
       ...cookieArgs,
-      '--js-runtimes', 'node',
-      ...(cookieArgs.length > 0 ? [] : ['--extractor-args', 'youtube:player_client=android,web']),
-      '-f', 'ba/ba*/bestaudio/best',
+      '--js-runtimes', `node:${nodeBin}`,
+      '-f', 'ba/b/best',
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '192K',
