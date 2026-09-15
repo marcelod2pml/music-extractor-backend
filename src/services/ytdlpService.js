@@ -185,8 +185,14 @@ try {
 function getCookieArgs() {
   const secretPath = '/etc/secrets/cookies.txt';
   if (fs.existsSync(secretPath)) {
-    console.log('[ytdlpService] Usando cookies do Render Secret File:', secretPath);
-    return ['--cookies', secretPath];
+    const writableCookie = path.join(os.tmpdir(), 'render_secrets_cookies.txt');
+    try {
+      fs.copyFileSync(secretPath, writableCookie);
+      console.log('[ytdlpService] Cookies copiados para pasta gravável:', writableCookie);
+      return ['--cookies', writableCookie];
+    } catch (e) {
+      return ['--cookies', secretPath];
+    }
   }
   const rootCookie = path.join(__dirname, '../../cookies.txt');
   if (fs.existsSync(rootCookie)) {
