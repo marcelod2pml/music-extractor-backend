@@ -257,6 +257,8 @@ async function streamAudio(rawId, res) {
     const args = [
       '--no-warnings',
       '--no-playlist',
+      '--js-runtimes', 'node',
+      '--extractor-args', 'youtube:player_client=android,web',
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '192K',
