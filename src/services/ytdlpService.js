@@ -369,7 +369,6 @@ async function streamAudio(rawId, res) {
     const args = [
       '--no-warnings',
       '--no-playlist',
-      '--force-ipv4',
       ...jsArgs,
       ...clientArgs,
       '-f', 'ba/ba*/bestaudio/best',

@@ -59,14 +59,18 @@ app.use('/api', globalApiLimiter, audioRoutes);
 // Rota raiz de boas-vindas e status da API
 app.get('/', (req, res) => {
   res.json({
-    name: 'Music Offline Extractor API',
-    version: '1.0.0',
+    name: 'Music Offline Extractor API & Worker',
+    version: '2.6.0-async-worker',
     status: 'online',
     endpoints: {
       health: 'GET /health',
       search: 'GET /api/search?q={termo}&limit=15',
-      download: 'GET /api/download?id={videoId}',
+      createJob: 'POST /api/download { videoId: "..." }',
+      jobStatus: 'GET /api/download/status/:jobId',
+      jobFile: 'GET /api/download/file/:jobId',
+      legacyDownload: 'GET /api/download?id={videoId}',
       info: 'GET /api/info?id={videoId}',
+      debugDownload: 'GET /api/debug-download?id={videoId}',
     },
   });
 });
@@ -82,11 +86,15 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Erro interno no servidor' });
 });
 
-// Inicialização do Servidor
+// Inicialização do Servidor e Worker
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`=========================================`);
   console.log(`🚀 Music Extractor API rodando na porta ${PORT}`);
   console.log(`🔗 Health Check: http://localhost:${PORT}/health`);
   console.log(`🔍 Exemplo Busca: http://localhost:${PORT}/api/search?q=lofi`);
   console.log(`=========================================`);
+
+  // Inicializa o worker de download desacoplado
+  const { downloadWorker } = require('./worker/downloadWorker');
+  downloadWorker.start();
 });

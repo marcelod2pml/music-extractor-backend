@@ -1,4 +1,6 @@
 const ytdlpService = require('../services/ytdlpService');
+const { jobQueue } = require('../queue/jobQueue');
+const { storageService } = require('../storage/storageService');
 
 /**
  * Endpoint de busca de músicas / vídeos
@@ -134,7 +136,6 @@ async function debugDownload(req, res) {
   const args = [
     '-v',
     '--no-playlist',
-    '--force-ipv4',
     ...jsArgs,
     ...clientArgs,
     '-f', 'ba/ba*/bestaudio/best',
@@ -243,6 +244,124 @@ async function debugDownload(req, res) {
   });
 }
 
+/**
+ * Criação de job assíncrono de download
+ * POST /api/download { videoId: "..." }
+ */
+async function createDownloadJob(req, res) {
+  try {
+    const rawId = req.body?.videoId || req.body?.id || req.query?.id || req.query?.videoId;
+    const cleanId = ytdlpService.sanitizeVideoId(rawId);
+
+    if (!cleanId) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de vídeo inválido. Esperado ID público do YouTube com 11 caracteres alfanuméricos.',
+      });
+    }
+
+    const { job, isExisting } = jobQueue.enqueue(cleanId);
+
+    return res.status(isExisting ? 200 : 202).json({
+      success: true,
+      jobId: job.id,
+      videoId: job.videoId,
+      status: job.status,
+      progress: job.progress,
+      stage: job.stage,
+      downloadUrl: job.status === 'completed' ? `/api/download/file/${job.id}` : null,
+      message: isExisting ? 'Job existente retornado' : 'Job criado com sucesso na fila',
+    });
+  } catch (err) {
+    console.error('[audioController] Erro ao criar job:', err.message);
+    return res.status(500).json({ success: false, error: 'Falha ao enfileirar job de download' });
+  }
+}
+
+/**
+ * Consulta de status do job
+ * GET /api/download/status/:jobId
+ */
+async function getJobStatus(req, res) {
+  try {
+    const { jobId } = req.params;
+    if (!jobId) {
+      return res.status(400).json({ success: false, error: 'jobId é obrigatório' });
+    }
+
+    const job = jobQueue.getJob(jobId);
+    if (!job) {
+      return res.status(404).json({ success: false, error: 'Job não encontrado' });
+    }
+
+    return res.json({
+      success: true,
+      jobId: job.id,
+      videoId: job.videoId,
+      status: job.status,
+      progress: job.progress,
+      stage: job.stage,
+      downloadUrl: job.status === 'completed' ? `/api/download/file/${job.id}` : null,
+      duration: job.duration,
+      bitrate: job.bitrate,
+      fileSize: job.fileSize,
+      error: job.error,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+    });
+  } catch (err) {
+    console.error('[audioController] Erro ao consultar status do job:', err.message);
+    return res.status(500).json({ success: false, error: 'Falha interna ao consultar status do job' });
+  }
+}
+
+/**
+ * Entrega do arquivo MP3 final
+ * GET /api/download/file/:jobId
+ */
+async function getJobFile(req, res) {
+  try {
+    const { jobId } = req.params;
+    if (!jobId) {
+      return res.status(400).json({ error: 'jobId é obrigatório' });
+    }
+
+    const job = jobQueue.getJob(jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Job não encontrado' });
+    }
+
+    if (job.status !== 'completed') {
+      return res.status(400).json({
+        error: `O arquivo ainda não está pronto para download (status atual: ${job.status}, estágio: ${job.stage})`,
+      });
+    }
+
+    const storageKey = job.storageKey || `${job.videoId}.mp3`;
+    const exists = await storageService.fileExists(storageKey);
+
+    if (!exists) {
+      return res.status(404).json({ error: 'Arquivo MP3 não encontrado no storage persistente' });
+    }
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Disposition', `attachment; filename="${job.videoId}.mp3"`);
+
+    const stream = storageService.getFileStream(storageKey);
+    stream.on('error', (streamErr) => {
+      console.error('[audioController] Erro no stream do storage:', streamErr.message);
+      if (!res.headersSent) res.status(500).json({ error: 'Falha ao transmitir arquivo de áudio' });
+    });
+
+    stream.pipe(res);
+  } catch (err) {
+    console.error('[audioController] Erro ao entregar arquivo do job:', err.message);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Falha interna ao entregar arquivo do job' });
+    }
+  }
+}
+
 module.exports = {
   search,
   download,
@@ -250,4 +369,7 @@ module.exports = {
   info,
   health,
   debugDownload,
+  createDownloadJob,
+  getJobStatus,
+  getJobFile,
 };

@@ -6,7 +6,16 @@ const router = express.Router();
 // GET /api/search?q={termo}&limit=15
 router.get('/search', audioController.search);
 
-// GET /api/download?id={videoId}
+// POST /api/download { videoId: "..." } - Cria job assíncrono de download
+router.post('/download', audioController.createDownloadJob);
+
+// GET /api/download/status/:jobId - Consulta status do job
+router.get('/download/status/:jobId', audioController.getJobStatus);
+
+// GET /api/download/file/:jobId - Obtém o arquivo MP3 final gerado
+router.get('/download/file/:jobId', audioController.getJobFile);
+
+// GET /api/download?id={videoId} - Rota síncrona legada mantida para compatibilidade
 router.get('/download', audioController.download);
 
 // GET /api/suggest?q={termo}
