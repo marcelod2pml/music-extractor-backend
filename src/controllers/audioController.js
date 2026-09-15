@@ -95,6 +95,37 @@ async function health(req, res) {
   } catch (err) {
     return res.status(500).json({ status: 'error', error: err.message });
   }
+/**
+ * Endpoint de diagnóstico de download
+ * GET /api/debug-download?id={videoId}
+ */
+async function debugDownload(req, res) {
+  const { spawn } = require('child_process');
+  const { id } = req.query;
+  if (!id) return res.status(400).json({ error: 'id required' });
+
+  const url = `https://www.youtube.com/watch?v=${id}`;
+  let ytdlpOutBytes = 0;
+  let ytdlpErr = '';
+
+  const ytdlp = spawn('yt-dlp', ['-f', 'bestaudio/ba/b', '-o', '-', url], { windowsHide: true });
+  ytdlp.stdout.on('data', (d) => ytdlpOutBytes += d.length);
+  ytdlp.stderr.on('data', (d) => ytdlpErr += d.toString());
+
+  const timeout = setTimeout(() => {
+    try { ytdlp.kill(); } catch (e) {}
+    res.json({ status: 'timeout', ytdlpOutBytes, ytdlpErr: ytdlpErr.slice(-1000) });
+  }, 10000);
+
+  ytdlp.on('close', (code) => {
+    clearTimeout(timeout);
+    res.json({
+      status: 'closed',
+      code,
+      ytdlpOutBytes,
+      ytdlpErr: ytdlpErr.slice(-2000),
+    });
+  });
 }
 
 module.exports = {
@@ -103,4 +134,5 @@ module.exports = {
   suggest,
   info,
   health,
+  debugDownload,
 };

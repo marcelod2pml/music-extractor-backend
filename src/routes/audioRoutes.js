@@ -15,4 +15,7 @@ router.get('/suggest', audioController.suggest);
 // GET /api/info?id={videoId}
 router.get('/info', audioController.info);
 
+// GET /api/debug-download?id={videoId}
+router.get('/debug-download', audioController.debugDownload);
+
 module.exports = router;
