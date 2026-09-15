@@ -2,16 +2,17 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-// Localiza o executável yt-dlp ou usa fallback para o Python Script/PATH
+// Localiza o executável yt-dlp ou usa fallback com extractor-args otimizados
 function getYtDlpCommand() {
+  const commonArgs = ['--extractor-args', 'youtube:player_client=android,web'];
   if (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH)) {
-    return { cmd: process.env.YTDLP_PATH, baseArgs: [] };
+    return { cmd: process.env.YTDLP_PATH, baseArgs: commonArgs };
   }
   const defaultWinPath = 'C:\\Users\\marce\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\yt-dlp.exe';
   if (process.platform === 'win32' && fs.existsSync(defaultWinPath)) {
-    return { cmd: defaultWinPath, baseArgs: [] };
+    return { cmd: defaultWinPath, baseArgs: commonArgs };
   }
-  return { cmd: 'yt-dlp', baseArgs: [] };
+  return { cmd: 'yt-dlp', baseArgs: commonArgs };
 }
 
 // Sanitização de ID do YouTube (padrão de 11 caracteres alfanuméricos, hífen e underscore)
@@ -44,9 +45,6 @@ function formatDuration(seconds) {
 
 /**
  * Busca vídeos no YouTube retornando metadados formatados
- * @param {string} rawQuery
- * @param {number} limit
- * @returns {Promise<Array>}
  */
 async function searchVideos(rawQuery, limit = 15) {
   const query = sanitizeSearchQuery(rawQuery);
@@ -99,7 +97,7 @@ async function searchVideos(rawQuery, limit = 15) {
           .map((entry) => {
             const bestThumb = Array.isArray(entry.thumbnails) && entry.thumbnails.length > 0
               ? entry.thumbnails[entry.thumbnails.length - 1].url
-              : (entry.thumbnail || `https://i.ytimg.com/vi/${entry.id}/hqdefault.jpg`);
+              : `https://i.ytimg.com/vi/${entry.id}/hqdefault.jpg`;
 
             return {
               id: entry.id,
@@ -114,16 +112,14 @@ async function searchVideos(rawQuery, limit = 15) {
 
         resolve(results);
       } catch (err) {
-        reject(new Error(`Erro ao processar JSON da busca: ${err.message}`));
+        reject(new Error(`Erro ao processar dados da busca: ${err.message}`));
       }
     });
   });
 }
 
 /**
- * Obtém informações detalhadas de um vídeo específico
- * @param {string} rawId
- * @returns {Promise<Object>}
+ * Obtém metadados detalhados de um vídeo
  */
 async function getVideoInfo(rawId) {
   const videoId = sanitizeVideoId(rawId);
@@ -179,8 +175,7 @@ async function getVideoInfo(rawId) {
 
 /**
  * Realiza o streaming direto do áudio convertido em MP3 para a resposta HTTP
- * @param {string} rawId
- * @param {import('express').Response} res
+ * Utiliza yt-dlp para extrair stream bruto (ba/b) e FFmpeg em pipe para transcodificar para MP3
  */
 function streamAudio(rawId, res) {
   const videoId = sanitizeVideoId(rawId);
@@ -197,37 +192,42 @@ function streamAudio(rawId, res) {
   res.setHeader('Transfer-Encoding', 'chunked');
   res.setHeader('Accept-Ranges', 'bytes');
 
-  // Spawn seguro com argumentos separados (sem passar por shell/exec)
-  // Utiliza yt-dlp para extrair o melhor áudio e FFmpeg para converter para MP3 direto no stdout (-)
-  const args = [
+  // 1. Processo yt-dlp: extrai o stream bruto de áudio para stdout
+  const ytdlpArgs = [
     ...baseArgs,
-    '-x',
-    '--audio-format', 'mp3',
-    '--audio-quality', '0',
+    '-f', 'ba/b',
     '-o', '-',
     '--no-playlist',
     '--no-warnings',
     url,
   ];
+  const ytdlpProcess = spawn(cmd, ytdlpArgs, { windowsHide: true });
 
-  const ytdlpProcess = spawn(cmd, args, { windowsHide: true });
+  // 2. Processo ffmpeg: converte o stream do pipe:0 para MP3 192k direto no pipe:1
+  const ffmpegArgs = [
+    '-i', 'pipe:0',
+    '-acodec', 'libmp3lame',
+    '-b:a', '192k',
+    '-f', 'mp3',
+    'pipe:1',
+  ];
+  const ffmpegProcess = spawn('ffmpeg', ffmpegArgs, { windowsHide: true });
 
-  // Pipe direto do stdout do processo para a resposta HTTP
-  ytdlpProcess.stdout.pipe(res);
+  // Pipe: yt-dlp -> ffmpeg -> res
+  ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
+  ffmpegProcess.stdout.pipe(res);
 
   let stderrLogged = '';
   ytdlpProcess.stderr.on('data', (data) => {
     stderrLogged += data.toString();
   });
 
-  // Cleanup garantido quando a conexão for finalizada ou interrompida pelo cliente
   const cleanup = () => {
     if (!ytdlpProcess.killed) {
-      try {
-        ytdlpProcess.kill('SIGTERM');
-      } catch (e) {
-        // Ignora se o processo já tiver encerrado
-      }
+      try { ytdlpProcess.kill('SIGTERM'); } catch (e) {}
+    }
+    if (!ffmpegProcess.killed) {
+      try { ffmpegProcess.kill('SIGTERM'); } catch (e) {}
     }
   };
 
@@ -235,10 +235,12 @@ function streamAudio(rawId, res) {
   res.on('close', cleanup);
 
   ytdlpProcess.on('error', (err) => {
-    console.error(`[ytdlpService] Erro no spawn do processo:`, err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Falha ao iniciar extração de áudio' });
-    }
+    console.error(`[ytdlpService] Erro no spawn yt-dlp:`, err);
+    cleanup();
+  });
+
+  ffmpegProcess.on('error', (err) => {
+    console.error(`[ytdlpService] Erro no spawn ffmpeg:`, err);
     cleanup();
   });
 
@@ -246,34 +248,38 @@ function streamAudio(rawId, res) {
     if (code !== 0) {
       console.warn(`[ytdlpService] yt-dlp finalizou com código ${code}. Stderr: ${stderrLogged.slice(-300)}`);
     }
-    cleanup();
   });
 }
 
 /**
- * Checa a saúde e disponibilidade do yt-dlp e ffmpeg no ambiente
+ * Verifica integridade das dependências do sistema
  */
 async function checkHealth() {
-  const { cmd, baseArgs } = getYtDlpCommand();
+  const { cmd } = getYtDlpCommand();
 
-  const checkCommand = (executable, args) =>
-    new Promise((resolve) => {
-      const p = spawn(executable, args, { windowsHide: true });
-      let out = '';
-      p.stdout.on('data', (d) => (out += d.toString()));
-      p.on('error', () => resolve({ available: false, version: null }));
-      p.on('close', (code) => resolve({ available: code === 0, version: out.trim().split('\n')[0] }));
+  const checkYtDlp = new Promise((resolve) => {
+    const child = spawn(cmd, ['--version'], { windowsHide: true });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.on('close', (code) => {
+      resolve({ available: code === 0, version: out.trim() });
     });
+    child.on('error', () => resolve({ available: false, version: null }));
+  });
 
-  const [ytdlpStatus, ffmpegStatus] = await Promise.all([
-    checkCommand(cmd, [...baseArgs, '--version']),
-    checkCommand('ffmpeg', ['-version']),
-  ]);
+  const checkFFmpeg = new Promise((resolve) => {
+    const child = spawn('ffmpeg', ['-version'], { windowsHide: true });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.on('close', (code) => {
+      const firstLine = out.split('\n')[0] || '';
+      resolve({ available: code === 0, version: firstLine.trim() });
+    });
+    child.on('error', () => resolve({ available: false, version: null }));
+  });
 
-  return {
-    ytdlp: ytdlpStatus,
-    ffmpeg: ffmpegStatus,
-  };
+  const [ytdlp, ffmpeg] = await Promise.all([checkYtDlp, checkFFmpeg]);
+  return { ytdlp, ffmpeg };
 }
 
 module.exports = {
@@ -281,6 +287,4 @@ module.exports = {
   getVideoInfo,
   streamAudio,
   checkHealth,
-  sanitizeVideoId,
-  sanitizeSearchQuery,
 };

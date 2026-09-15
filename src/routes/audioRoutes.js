@@ -9,6 +9,9 @@ router.get('/search', audioController.search);
 // GET /api/download?id={videoId}
 router.get('/download', audioController.download);
 
+// GET /api/suggest?q={termo}
+router.get('/suggest', audioController.suggest);
+
 // GET /api/info?id={videoId}
 router.get('/info', audioController.info);
 

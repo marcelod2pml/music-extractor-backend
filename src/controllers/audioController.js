@@ -44,6 +44,22 @@ async function download(req, res) {
 }
 
 /**
+ * Endpoint de sugestões inteligentes ao digitar (Autocomplete)
+ * GET /api/suggest?q={termo}
+ */
+async function suggest(req, res) {
+  try {
+    const { q } = req.query;
+    if (!q || !q.trim()) return res.json([]);
+    const response = await fetch(`https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${encodeURIComponent(q.trim())}`);
+    const data = await response.json();
+    return res.json(data[1] || []);
+  } catch (err) {
+    return res.json([]);
+  }
+}
+
+/**
  * Endpoint de metadados detalhados
  * GET /api/info?id={videoId}
  */
@@ -84,6 +100,7 @@ async function health(req, res) {
 module.exports = {
   search,
   download,
+  suggest,
   info,
   health,
 };
