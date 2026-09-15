@@ -9,6 +9,9 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 3333;
 
+// Permite que o Express identifique os IPs reais dos clientes atrás do proxy do Render / Cloudflare
+app.set('trust proxy', 1);
+
 // Middlewares de segurança e utilitários
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
@@ -16,21 +19,23 @@ app.use(helmet({
 app.use(cors());
 app.use(express.json());
 
-// Limitador de taxa global para a API (máximo 60 requisições por minuto por IP)
+// Limitador de taxa global para a API (máximo 120 requisições por minuto por IP)
 const globalApiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
+  message: { error: 'Muitas requisições enviadas. Aguarde alguns instantes antes de tentar novamente.' },
+});
+
+// Limitador para streaming e extração de áudio
+const downloadLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Muitas requisições enviadas. Aguarde alguns instantes antes de tentar novamente.' },
-});
-
-// Limitador estrito para streaming e extração de áudio (máximo 15 downloads por minuto por IP)
-const downloadLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 15,
-  standardHeaders: true,
-  legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   message: { error: 'Limite de downloads simultâneos atingido para este IP. Aguarde um minuto.' },
 });
 
