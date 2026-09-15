@@ -89,6 +89,7 @@ async function health(req, res) {
 
     return res.status(isHealthy ? 200 : 503).json({
       status: isHealthy ? 'healthy' : 'degraded',
+      version: '2.2.0-extractor-android',
       timestamp: new Date().toISOString(),
       dependencies: status,
     });
