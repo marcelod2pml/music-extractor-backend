@@ -1,0 +1,20 @@
+{
+  "name": "music-offline-backend",
+  "version": "1.0.0",
+  "description": "Backend API para extração e streaming de áudio com yt-dlp e FFmpeg",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}

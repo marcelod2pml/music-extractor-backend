@@ -1,0 +1,15 @@
+const express = require('express');
+const audioController = require('../controllers/audioController');
+
+const router = express.Router();
+
+// GET /api/search?q={termo}&limit=15
+router.get('/search', audioController.search);
+
+// GET /api/download?id={videoId}
+router.get('/download', audioController.download);
+
+// GET /api/info?id={videoId}
+router.get('/info', audioController.info);
+
+module.exports = router;
