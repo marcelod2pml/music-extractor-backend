@@ -181,37 +181,109 @@ try {
   console.warn('[ytdlpService] Aviso ao inicializar pasta de cache temporário:', e.message);
 }
 
-// Localiza arquivo de cookies se configurado (Render Secret File /etc/secrets/cookies.txt ou env YTDLP_COOKIES)
-function getCookieArgs() {
-  const secretPath = '/etc/secrets/cookies.txt';
-  if (fs.existsSync(secretPath)) {
-    const writableCookie = path.join(os.tmpdir(), 'render_secrets_cookies.txt');
-    try {
-      fs.copyFileSync(secretPath, writableCookie);
-      console.log('[ytdlpService] Cookies copiados para pasta gravável:', writableCookie);
-      return ['--cookies', writableCookie];
-    } catch (e) {
-      return ['--cookies', secretPath];
-    }
+// Detecção dinâmica de runtimes JavaScript compatíveis com yt-dlp
+function getJsRuntimeArgs() {
+  const nodeBin = process.execPath || 'node';
+  if (process.platform === 'win32') {
+    return ['--js-runtimes', `node:${nodeBin}`];
   }
-  const rootCookie = path.join(__dirname, '../../cookies.txt');
-  if (fs.existsSync(rootCookie)) {
-    console.log('[ytdlpService] Usando cookies locais da raiz:', rootCookie);
-    return ['--cookies', rootCookie];
+  // Ambiente Linux (Container Alpine / Render)
+  if (fs.existsSync('/usr/bin/quickjs')) {
+    return ['--js-runtimes', `quickjs:/usr/bin/quickjs,node:${nodeBin}`];
   }
-  if (process.env.YTDLP_COOKIES && process.env.YTDLP_COOKIES.trim().length > 10) {
-    const tmpCookiePath = path.join(os.tmpdir(), 'yt_cookies.txt');
-    try {
-      fs.writeFileSync(tmpCookiePath, process.env.YTDLP_COOKIES.trim(), 'utf-8');
-      console.log('[ytdlpService] Usando cookies da variável de ambiente YTDLP_COOKIES');
-      return ['--cookies', tmpCookiePath];
-    } catch (e) {}
+  if (fs.existsSync('/usr/bin/qjs')) {
+    return ['--js-runtimes', `quickjs:/usr/bin/qjs,node:${nodeBin}`];
+  }
+  return ['--js-runtimes', `quickjs,node:${nodeBin}`];
+}
+
+// Configuração de cliente do YouTube (padrão resiliente do yt-dlp sem forçar web/tv)
+function getPlayerClientArgs() {
+  if (process.env.YTDLP_PLAYER_CLIENT && process.env.YTDLP_PLAYER_CLIENT.trim()) {
+    return ['--extractor-args', `youtube:player_client=${process.env.YTDLP_PLAYER_CLIENT.trim()}`];
   }
   return [];
 }
 
-function hasCookies() {
-  return getCookieArgs().length > 0;
+// Validação técnica e integridade do MP3 gerado via ffprobe
+async function validateMp3File(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return { valid: false, error: 'Arquivo MP3 não foi encontrado no disco' };
+  }
+  const stat = fs.statSync(filePath);
+  if (stat.size === 0) {
+    return { valid: false, error: 'Arquivo gerado possui 0 bytes' };
+  }
+
+  return new Promise((resolve) => {
+    const args = [
+      '-v', 'error',
+      '-show_entries', 'format=format_name,duration,bit_rate',
+      '-show_entries', 'stream=codec_name,bit_rate',
+      '-of', 'json',
+      filePath,
+    ];
+
+    const child = spawn('ffprobe', args, { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        return resolve({
+          valid: false,
+          error: `ffprobe falhou com código ${code}: ${stderr.trim()}`,
+        });
+      }
+
+      try {
+        const parsed = JSON.parse(stdout);
+        const formatName = parsed.format?.format_name || '';
+        const duration = parseFloat(parsed.format?.duration || 0);
+        const bitrate = parseInt(parsed.format?.bit_rate || 0, 10);
+        const hasAudioStream = parsed.streams && parsed.streams.length > 0;
+
+        const isMp3 = formatName.split(',').includes('mp3');
+
+        if (!isMp3 && !hasAudioStream) {
+          return resolve({
+            valid: false,
+            error: `Formato de áudio inválido retornado pelo ffprobe: ${formatName}`,
+          });
+        }
+
+        if (duration <= 0) {
+          return resolve({
+            valid: false,
+            error: 'Duração do áudio é zero ou inválida',
+          });
+        }
+
+        resolve({
+          valid: true,
+          duration,
+          bitrate,
+          formatName,
+          sizeBytes: stat.size,
+        });
+      } catch (err) {
+        resolve({
+          valid: false,
+          error: `Falha ao processar metadados do ffprobe: ${err.message}`,
+        });
+      }
+    });
+
+    child.on('error', (err) => {
+      resolve({
+        valid: false,
+        error: `Falha ao iniciar ffprobe: ${err.message}`,
+      });
+    });
+  });
 }
 
 // Mapa para gerenciar requisições simultâneas para o mesmo vídeo
@@ -235,10 +307,10 @@ function pruneCacheIfNeeded() {
 
 /**
  * Realiza o streaming e download do áudio convertido em MP3
- * Converte diretamente com yt-dlp -x para MP3 no disco e entrega via res.sendFile
- * Isso garante compatibilidade total com formatos DASH do YouTube e fornece cache de 0ms
+ * Converte diretamente com yt-dlp -x para MP3 no disco, valida com ffprobe e entrega via res.sendFile
  */
 async function streamAudio(rawId, res) {
+  const startTime = Date.now();
   const videoId = sanitizeVideoId(rawId);
   if (!videoId) {
     return res.status(400).json({ error: 'ID de vídeo inválido (esperado 11 caracteres alfanuméricos)' });
@@ -251,16 +323,17 @@ async function streamAudio(rawId, res) {
     res.setHeader('Content-Disposition', `attachment; filename="${videoId}.mp3"`);
     res.sendFile(cachedFile, (err) => {
       if (err && !res.headersSent) {
-        console.error('[ytdlpService] Erro no sendFile:', err.message);
+        console.error(`[YouTube] Erro no sendFile para ${videoId}:`, err.message);
       }
     });
   };
 
-  // 1. Se o arquivo já existe em cache e tem tamanho válido (> 10KB), entrega instantaneamente!
+  // 1. Se o arquivo já existe em cache e tem tamanho válido (> 10KB), entrega instantaneamente
   if (fs.existsSync(cachedFile)) {
     try {
       const stat = fs.statSync(cachedFile);
       if (stat.size > 10240) {
+        console.log(`[YouTube] Arquivo em cache entregue para video ID: ${videoId} (${stat.size} bytes)`);
         return sendCachedFile();
       } else {
         try { fs.unlinkSync(cachedFile); } catch (e) { }
@@ -280,24 +353,26 @@ async function streamAudio(rawId, res) {
     }
   }
 
-  // 3. Inicia extração do áudio
+  // 3. Inicia extração do áudio com logs estruturados
+  console.log(`[YouTube] início: ${videoId}`);
+  console.log(`[YouTube] video ID: ${videoId}`);
+  console.log(`[YouTube] extração iniciada: https://www.youtube.com/watch?v=${videoId}`);
+
   pruneCacheIfNeeded();
   const { cmd } = getYtDlpCommand();
   const url = `https://www.youtube.com/watch?v=${videoId}`;
   const templatePath = path.join(CACHE_DIR, `${videoId}.%(ext)s`);
 
   const downloadPromise = new Promise((resolve, reject) => {
-    const cookieArgs = getCookieArgs();
-    const nodeBin = process.execPath || 'node';
-    const clientArg = cookieArgs.length > 0 ? 'mweb,tv,web' : 'mweb,android,web';
+    const jsArgs = getJsRuntimeArgs();
+    const clientArgs = getPlayerClientArgs();
     const args = [
       '--no-warnings',
       '--no-playlist',
       '--force-ipv4',
-      ...cookieArgs,
-      '--js-runtimes', `quickjs,node:${nodeBin}`,
-      '--extractor-args', `youtube:player_client=${clientArg}`,
-      '-f', 'ba/ba*/18/bestaudio/best',
+      ...jsArgs,
+      ...clientArgs,
+      '-f', 'ba/ba*/bestaudio/best',
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '192K',
@@ -307,20 +382,43 @@ async function streamAudio(rawId, res) {
 
     const child = spawn(cmd, args, { windowsHide: true });
     let stderrData = '';
+    let selectedFormat = 'ba/bestaudio';
+
+    child.stdout.on('data', (d) => {
+      const text = d.toString();
+      const matchFormat = text.match(/Downloading 1 format\(s\):\s*(\S+)/i);
+      if (matchFormat) {
+        selectedFormat = matchFormat[1];
+        console.log(`[YouTube] formato selecionado: ${selectedFormat}`);
+      }
+      if (text.includes('[ExtractAudio]')) {
+        console.log(`[YouTube] FFmpeg iniciado: convertendo áudio extraído para MP3 192K`);
+      }
+    });
 
     child.stderr.on('data', (d) => {
       stderrData += d.toString();
     });
 
     child.on('error', (err) => {
-      reject(new Error(`Falha ao iniciar yt-dlp: ${err.message}`));
+      reject({ stage: 'extractor', message: `Falha ao iniciar yt-dlp: ${err.message}` });
     });
 
-    child.on('close', (code) => {
+    child.on('close', async (code) => {
       if (code === 0 && fs.existsSync(cachedFile)) {
-        resolve(cachedFile);
+        console.log(`[YouTube] conversão concluída: gerado ${cachedFile}`);
+        // Etapa 8: Validação do MP3 com ffprobe
+        const validation = await validateMp3File(cachedFile);
+        if (!validation.valid) {
+          try { fs.unlinkSync(cachedFile); } catch (e) { }
+          return reject({ stage: 'validation-output', message: validation.error });
+        }
+        console.log(`[YouTube] arquivo validado: duração=${validation.duration}s, bitrate=${validation.bitrate}bps`);
+        console.log(`[YouTube] tempo total: ${Date.now() - startTime}ms`);
+        resolve({ cachedFile, validation, format: selectedFormat });
       } else {
-        reject(new Error(`yt-dlp finalizou com código ${code}: ${stderrData.slice(-300)}`));
+        const cleanErr = stderrData.trim().slice(-400) || `Código de saída ${code}`;
+        reject({ stage: 'extractor', message: cleanErr });
       }
     });
   });
@@ -333,10 +431,11 @@ async function streamAudio(rawId, res) {
     return sendCachedFile();
   } catch (err) {
     inFlightDownloads.delete(videoId);
-    console.error(`[ytdlpService] Falha na extração de ${videoId}:`, err.message);
+    console.error(`[YouTube] Erro na etapa '${err.stage || 'processamento'}' para ${videoId}:`, err.message);
     if (!res.headersSent) {
       return res.status(500).json({
         error: 'Não foi possível extrair o áudio desta música.',
+        stage: err.stage || 'extractor',
         details: err.message,
       });
     }
@@ -379,6 +478,9 @@ module.exports = {
   getVideoInfo,
   streamAudio,
   checkHealth,
-  hasCookies,
-  getCookieArgs,
+  validateMp3File,
+  getJsRuntimeArgs,
+  getPlayerClientArgs,
+  sanitizeVideoId,
+  getYtDlpCommand,
 };

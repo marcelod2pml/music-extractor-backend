@@ -89,8 +89,7 @@ async function health(req, res) {
 
     return res.status(isHealthy ? 200 : 503).json({
       status: isHealthy ? 'healthy' : 'degraded',
-      version: '2.4.0-quickjs-ejs',
-      cookiesConfigured: ytdlpService.hasCookies(),
+      version: '2.5.0-clean-no-cookies',
       timestamp: new Date().toISOString(),
       dependencies: status,
     });
@@ -101,51 +100,144 @@ async function health(req, res) {
 
 /**
  * Endpoint de diagnóstico de download
- * GET /api/debug-download?id={videoId}&client={web|android|tv|ios}
+ * GET /api/debug-download?id={videoId}
+ * Retorna diagnóstico seguro com estágios de execução (validation, extractor, ffmpeg, validation-output, completed)
  */
 async function debugDownload(req, res) {
   const { spawn } = require('child_process');
-  const { id, client } = req.query;
-  if (!id) return res.status(400).json({ error: 'id required' });
+  const path = require('path');
+  const fs = require('fs');
+  const os = require('os');
+  const { id } = req.query;
 
-  const url = `https://www.youtube.com/watch?v=${id}`;
-  let ytdlpOut = '';
-  let ytdlpErr = '';
+  // 1. Estágio: Validação do ID
+  const cleanId = ytdlpService.sanitizeVideoId(id);
+  if (!cleanId) {
+    return res.status(400).json({
+      success: false,
+      videoId: id || null,
+      stage: 'validation',
+      error: 'ID de vídeo inválido. Esperado ID público do YouTube com 11 caracteres alfanuméricos.',
+    });
+  }
 
-  const cookieArgs = ytdlpService.getCookieArgs ? ytdlpService.getCookieArgs() : [];
-  const nodeBin = process.execPath || 'node';
-  const clientArg = client || (cookieArgs.length > 0 ? 'web,tv' : 'android');
+  const url = `https://www.youtube.com/watch?v=${cleanId}`;
+  const tempFile = path.join(os.tmpdir(), `debug_test_${cleanId}_${Date.now()}.mp3`);
+  const templatePath = path.join(os.tmpdir(), `debug_test_${cleanId}_${Date.now()}.%(ext)s`);
+
+  const { cmd } = ytdlpService.getYtDlpCommand ? ytdlpService.getYtDlpCommand() : { cmd: 'yt-dlp' };
+  const jsArgs = ytdlpService.getJsRuntimeArgs ? ytdlpService.getJsRuntimeArgs() : [];
+  const clientArgs = ytdlpService.getPlayerClientArgs ? ytdlpService.getPlayerClientArgs() : [];
+
   const args = [
     '-v',
     '--no-playlist',
     '--force-ipv4',
-    ...cookieArgs,
-    '--js-runtimes', `node:${nodeBin}`,
-    '--extractor-args', `youtube:player_client=${clientArg}`,
-    '-g',
-    '-f', 'ba/ba*/18/bestaudio/best',
+    ...jsArgs,
+    ...clientArgs,
+    '-f', 'ba/ba*/bestaudio/best',
+    '-x',
+    '--audio-format', 'mp3',
+    '--audio-quality', '192K',
+    '-o', templatePath,
     url,
   ];
 
-  const ytdlp = spawn('yt-dlp', args, { windowsHide: true });
-  ytdlp.stdout.on('data', (d) => (ytdlpOut += d.toString()));
-  ytdlp.stderr.on('data', (d) => (ytdlpErr += d.toString()));
+  let ytdlpOut = '';
+  let ytdlpErr = '';
+  let selectedFormat = 'ba/bestaudio';
+  let currentStage = 'extractor';
+
+  const child = spawn(cmd, args, { windowsHide: true });
+
+  child.stdout.on('data', (d) => {
+    const text = d.toString();
+    ytdlpOut += text;
+    const matchFormat = text.match(/Downloading 1 format\(s\):\s*(\S+)/i);
+    if (matchFormat) {
+      selectedFormat = matchFormat[1];
+      currentStage = 'format-selection';
+    }
+    if (text.includes('[ExtractAudio]')) {
+      currentStage = 'ffmpeg';
+    }
+  });
+
+  child.stderr.on('data', (d) => {
+    ytdlpErr += d.toString();
+  });
 
   const timeout = setTimeout(() => {
-    try { ytdlp.kill(); } catch (e) { }
-    res.json({ status: 'timeout', client: clientArg, ytdlpOut, ytdlpErr: ytdlpErr.slice(-3000) });
+    try { child.kill(); } catch (e) { }
+    if (!res.headersSent) {
+      res.status(504).json({
+        success: false,
+        videoId: cleanId,
+        stage: currentStage,
+        format: selectedFormat,
+        error: 'Tempo limite excedido na extração do vídeo (25s)',
+        details: ytdlpErr.slice(-1500),
+      });
+    }
   }, 25000);
 
-  ytdlp.on('close', (code) => {
+  child.on('close', async (code) => {
     clearTimeout(timeout);
-    res.json({
-      status: 'closed',
-      code,
-      client: clientArg,
-      hasCookies: cookieArgs.length > 0,
-      ytdlpOut,
-      ytdlpErr: ytdlpErr.slice(-3000),
-    });
+    if (res.headersSent) return;
+
+    if (code === 0 && fs.existsSync(tempFile)) {
+      currentStage = 'validation-output';
+      const validation = await ytdlpService.validateMp3File(tempFile);
+
+      // Limpa arquivo de teste temporário do diagnóstico
+      try { fs.unlinkSync(tempFile); } catch (e) { }
+
+      if (!validation.valid) {
+        return res.status(500).json({
+          success: false,
+          videoId: cleanId,
+          stage: 'validation-output',
+          format: selectedFormat,
+          error: validation.error,
+        });
+      }
+
+      return res.json({
+        success: true,
+        videoId: cleanId,
+        stage: 'completed',
+        format: selectedFormat,
+        duration: validation.duration,
+        bitrate: validation.bitrate,
+        outputFormat: 'mp3',
+        sizeBytes: validation.sizeBytes,
+      });
+    } else {
+      // Remove arquivo se ficou inconsistente
+      try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch (e) { }
+
+      const cleanMsg = ytdlpErr.trim().slice(-1500) || `Processo finalizou com código ${code}`;
+      return res.status(500).json({
+        success: false,
+        videoId: cleanId,
+        stage: currentStage,
+        format: selectedFormat,
+        error: 'Falha na extração de áudio pelo yt-dlp',
+        details: cleanMsg,
+      });
+    }
+  });
+
+  child.on('error', (err) => {
+    clearTimeout(timeout);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        videoId: cleanId,
+        stage: currentStage,
+        error: `Falha ao iniciar processo yt-dlp: ${err.message}`,
+      });
+    }
   });
 }
 
