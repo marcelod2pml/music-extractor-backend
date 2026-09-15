@@ -127,7 +127,9 @@ async function debugDownload(req, res) {
 
   const { cmd } = ytdlpService.getYtDlpCommand ? ytdlpService.getYtDlpCommand() : { cmd: 'yt-dlp' };
   const jsArgs = ytdlpService.getJsRuntimeArgs ? ytdlpService.getJsRuntimeArgs() : [];
-  const clientArgs = ytdlpService.getPlayerClientArgs ? ytdlpService.getPlayerClientArgs() : [];
+  const clientArgs = req.query.client
+    ? ['--extractor-args', `youtube:player_client=${req.query.client.trim()}`]
+    : (ytdlpService.getPlayerClientArgs ? ytdlpService.getPlayerClientArgs() : []);
 
   const args = [
     '-v',

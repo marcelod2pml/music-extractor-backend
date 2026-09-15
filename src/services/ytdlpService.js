@@ -189,12 +189,12 @@ function getJsRuntimeArgs() {
   }
   // Ambiente Linux (Container Alpine / Render)
   if (fs.existsSync('/usr/bin/quickjs')) {
-    return ['--js-runtimes', `quickjs:/usr/bin/quickjs,node:${nodeBin}`];
+    return ['--js-runtimes', 'quickjs:/usr/bin/quickjs'];
   }
   if (fs.existsSync('/usr/bin/qjs')) {
-    return ['--js-runtimes', `quickjs:/usr/bin/qjs,node:${nodeBin}`];
+    return ['--js-runtimes', 'quickjs:/usr/bin/qjs'];
   }
-  return ['--js-runtimes', `quickjs,node:${nodeBin}`];
+  return ['--js-runtimes', 'quickjs'];
 }
 
 // Configuração de cliente do YouTube (padrão resiliente do yt-dlp sem forçar web/tv)
