@@ -2,17 +2,16 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-// Localiza o executável yt-dlp ou usa fallback com extractor-args otimizados
+// Localiza o executável yt-dlp ou usa fallback
 function getYtDlpCommand() {
-  const commonArgs = ['--extractor-args', 'youtube:player_client=android,web'];
   if (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH)) {
-    return { cmd: process.env.YTDLP_PATH, baseArgs: commonArgs };
+    return { cmd: process.env.YTDLP_PATH };
   }
   const defaultWinPath = 'C:\\Users\\marce\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\yt-dlp.exe';
   if (process.platform === 'win32' && fs.existsSync(defaultWinPath)) {
-    return { cmd: defaultWinPath, baseArgs: commonArgs };
+    return { cmd: defaultWinPath };
   }
-  return { cmd: 'yt-dlp', baseArgs: commonArgs };
+  return { cmd: 'yt-dlp' };
 }
 
 // Sanitização de ID do YouTube (padrão de 11 caracteres alfanuméricos, hífen e underscore)
@@ -52,12 +51,11 @@ async function searchVideos(rawQuery, limit = 15) {
     throw new Error('Termo de busca inválido');
   }
 
-  const { cmd, baseArgs } = getYtDlpCommand();
+  const { cmd } = getYtDlpCommand();
   const maxResults = Math.min(Math.max(Number(limit) || 15, 1), 30);
   const searchArg = `ytsearch${maxResults}:${query}`;
 
   const args = [
-    ...baseArgs,
     '--dump-single-json',
     '--flat-playlist',
     '--no-playlist',
@@ -127,11 +125,10 @@ async function getVideoInfo(rawId) {
     throw new Error('ID de vídeo inválido');
   }
 
-  const { cmd, baseArgs } = getYtDlpCommand();
+  const { cmd } = getYtDlpCommand();
   const url = `https://www.youtube.com/watch?v=${videoId}`;
 
   const args = [
-    ...baseArgs,
     '--dump-single-json',
     '--no-warnings',
     '--skip-download',
@@ -175,7 +172,7 @@ async function getVideoInfo(rawId) {
 
 /**
  * Realiza o streaming direto do áudio convertido em MP3 para a resposta HTTP
- * Utiliza yt-dlp para extrair stream bruto (ba/b) e FFmpeg em pipe para transcodificar para MP3
+ * Utiliza yt-dlp (-q para dados puros) e FFmpeg (-vn para áudio puro) gerando MP3 contínuo
  */
 function streamAudio(rawId, res) {
   const videoId = sanitizeVideoId(rawId);
@@ -183,7 +180,7 @@ function streamAudio(rawId, res) {
     return res.status(400).json({ error: 'ID de vídeo inválido (esperado 11 caracteres alfanuméricos)' });
   }
 
-  const { cmd, baseArgs } = getYtDlpCommand();
+  const { cmd } = getYtDlpCommand();
   const url = `https://www.youtube.com/watch?v=${videoId}`;
 
   // Headers adequados para streaming e download de áudio
@@ -192,20 +189,20 @@ function streamAudio(rawId, res) {
   res.setHeader('Transfer-Encoding', 'chunked');
   res.setHeader('Accept-Ranges', 'bytes');
 
-  // 1. Processo yt-dlp: extrai o stream bruto de áudio para stdout
+  // 1. Processo yt-dlp: -q silencia logs de texto para não corromper o pipe binário
   const ytdlpArgs = [
-    ...baseArgs,
-    '-f', 'ba/b',
-    '-o', '-',
-    '--no-playlist',
+    '-q',
     '--no-warnings',
+    '-f', 'bestaudio/ba/b',
+    '-o', '-',
     url,
   ];
   const ytdlpProcess = spawn(cmd, ytdlpArgs, { windowsHide: true });
 
-  // 2. Processo ffmpeg: converte o stream do pipe:0 para MP3 192k direto no pipe:1
+  // 2. Processo ffmpeg: -vn ignora qualquer faixa de vídeo e codifica áudio MP3 192k contínuo
   const ffmpegArgs = [
     '-i', 'pipe:0',
+    '-vn',
     '-acodec', 'libmp3lame',
     '-b:a', '192k',
     '-f', 'mp3',
