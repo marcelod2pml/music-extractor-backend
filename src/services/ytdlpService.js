@@ -170,82 +170,136 @@ async function getVideoInfo(rawId) {
   });
 }
 
+const os = require('os');
+
+const CACHE_DIR = path.join(os.tmpdir(), 'music_extractor_cache');
+try {
+  if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+  }
+} catch (e) {
+  console.warn('[ytdlpService] Aviso ao inicializar pasta de cache temporário:', e.message);
+}
+
+// Mapa para gerenciar requisições simultâneas para o mesmo vídeo
+const inFlightDownloads = new Map();
+
+function pruneCacheIfNeeded() {
+  try {
+    const files = fs.readdirSync(CACHE_DIR);
+    if (files.length > 50) {
+      const fileStats = files.map((f) => {
+        const fp = path.join(CACHE_DIR, f);
+        return { path: fp, time: fs.statSync(fp).mtimeMs };
+      }).sort((a, b) => a.time - b.time);
+
+      for (let i = 0; i < 15; i++) {
+        try { fs.unlinkSync(fileStats[i].path); } catch (e) {}
+      }
+    }
+  } catch (e) {}
+}
+
 /**
- * Realiza o streaming direto do áudio convertido em MP3 para a resposta HTTP
- * Utiliza yt-dlp (-q para dados puros) e FFmpeg (-vn para áudio puro) gerando MP3 contínuo
+ * Realiza o streaming e download do áudio convertido em MP3
+ * Converte diretamente com yt-dlp -x para MP3 no disco e entrega via res.sendFile
+ * Isso garante compatibilidade total com formatos DASH do YouTube e fornece cache de 0ms
  */
-function streamAudio(rawId, res) {
+async function streamAudio(rawId, res) {
   const videoId = sanitizeVideoId(rawId);
   if (!videoId) {
     return res.status(400).json({ error: 'ID de vídeo inválido (esperado 11 caracteres alfanuméricos)' });
   }
 
-  const { cmd } = getYtDlpCommand();
-  const url = `https://www.youtube.com/watch?v=${videoId}`;
+  const cachedFile = path.join(CACHE_DIR, `${videoId}.mp3`);
 
-  // Headers adequados para streaming e download de áudio
-  res.setHeader('Content-Type', 'audio/mpeg');
-  res.setHeader('Content-Disposition', `attachment; filename="${videoId}.mp3"`);
-  res.setHeader('Transfer-Encoding', 'chunked');
-  res.setHeader('Accept-Ranges', 'bytes');
-
-  // 1. Processo yt-dlp: -q silencia logs de texto para não corromper o pipe binário
-  const ytdlpArgs = [
-    '-q',
-    '--no-warnings',
-    '-f', 'bestaudio/ba/b',
-    '-o', '-',
-    url,
-  ];
-  const ytdlpProcess = spawn(cmd, ytdlpArgs, { windowsHide: true });
-
-  // 2. Processo ffmpeg: -vn ignora qualquer faixa de vídeo e codifica áudio MP3 192k contínuo
-  const ffmpegArgs = [
-    '-i', 'pipe:0',
-    '-vn',
-    '-acodec', 'libmp3lame',
-    '-b:a', '192k',
-    '-f', 'mp3',
-    'pipe:1',
-  ];
-  const ffmpegProcess = spawn('ffmpeg', ffmpegArgs, { windowsHide: true });
-
-  // Pipe: yt-dlp -> ffmpeg -> res
-  ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
-  ffmpegProcess.stdout.pipe(res);
-
-  let stderrLogged = '';
-  ytdlpProcess.stderr.on('data', (data) => {
-    stderrLogged += data.toString();
-  });
-
-  const cleanup = () => {
-    if (!ytdlpProcess.killed) {
-      try { ytdlpProcess.kill('SIGTERM'); } catch (e) {}
-    }
-    if (!ffmpegProcess.killed) {
-      try { ffmpegProcess.kill('SIGTERM'); } catch (e) {}
-    }
+  const sendCachedFile = () => {
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Disposition', `attachment; filename="${videoId}.mp3"`);
+    res.sendFile(cachedFile, (err) => {
+      if (err && !res.headersSent) {
+        console.error('[ytdlpService] Erro no sendFile:', err.message);
+      }
+    });
   };
 
-  res.on('finish', cleanup);
-  res.on('close', cleanup);
+  // 1. Se o arquivo já existe em cache e tem tamanho válido (> 10KB), entrega instantaneamente!
+  if (fs.existsSync(cachedFile)) {
+    try {
+      const stat = fs.statSync(cachedFile);
+      if (stat.size > 10240) {
+        return sendCachedFile();
+      } else {
+        try { fs.unlinkSync(cachedFile); } catch (e) {}
+      }
+    } catch (e) {}
+  }
 
-  ytdlpProcess.on('error', (err) => {
-    console.error(`[ytdlpService] Erro no spawn yt-dlp:`, err);
-    cleanup();
-  });
-
-  ffmpegProcess.on('error', (err) => {
-    console.error(`[ytdlpService] Erro no spawn ffmpeg:`, err);
-    cleanup();
-  });
-
-  ytdlpProcess.on('close', (code) => {
-    if (code !== 0) {
-      console.warn(`[ytdlpService] yt-dlp finalizou com código ${code}. Stderr: ${stderrLogged.slice(-300)}`);
+  // 2. Se já existe uma extração em andamento para este mesmo videoId, aguarda
+  if (inFlightDownloads.has(videoId)) {
+    try {
+      await inFlightDownloads.get(videoId);
+      if (fs.existsSync(cachedFile)) {
+        return sendCachedFile();
+      }
+    } catch (e) {
+      // Tenta nova extração se a anterior falhou
     }
+  }
+
+  // 3. Inicia extração do áudio
+  pruneCacheIfNeeded();
+  const { cmd } = getYtDlpCommand();
+  const url = `https://www.youtube.com/watch?v=${videoId}`;
+  const templatePath = path.join(CACHE_DIR, `${videoId}.%(ext)s`);
+
+  const downloadPromise = new Promise((resolve, reject) => {
+    const args = [
+      '--no-warnings',
+      '--no-playlist',
+      '-x',
+      '--audio-format', 'mp3',
+      '--audio-quality', '192K',
+      '-o', templatePath,
+      url,
+    ];
+
+    const child = spawn(cmd, args, { windowsHide: true });
+    let stderrData = '';
+
+    child.stderr.on('data', (d) => {
+      stderrData += d.toString();
+    });
+
+    child.on('error', (err) => {
+      reject(new Error(`Falha ao iniciar yt-dlp: ${err.message}`));
+    });
+
+    child.on('close', (code) => {
+      if (code === 0 && fs.existsSync(cachedFile)) {
+        resolve(cachedFile);
+      } else {
+        reject(new Error(`yt-dlp finalizou com código ${code}: ${stderrData.slice(-300)}`));
+      }
+    });
   });
+
+  inFlightDownloads.set(videoId, downloadPromise);
+
+  try {
+    await downloadPromise;
+    inFlightDownloads.delete(videoId);
+    return sendCachedFile();
+  } catch (err) {
+    inFlightDownloads.delete(videoId);
+    console.error(`[ytdlpService] Falha na extração de ${videoId}:`, err.message);
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: 'Não foi possível extrair o áudio desta música.',
+        details: err.message,
+      });
+    }
+  }
 }
 
 /**
