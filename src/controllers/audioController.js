@@ -104,29 +104,40 @@ async function health(req, res) {
  */
 async function debugDownload(req, res) {
   const { spawn } = require('child_process');
-  const { id } = req.query;
+  const { id, client } = req.query;
   if (!id) return res.status(400).json({ error: 'id required' });
 
   const url = `https://www.youtube.com/watch?v=${id}`;
-  let ytdlpOutBytes = 0;
+  let ytdlpOut = '';
   let ytdlpErr = '';
 
-  const ytdlp = spawn('yt-dlp', ['-f', 'bestaudio/ba/b', '-o', '-', url], { windowsHide: true });
-  ytdlp.stdout.on('data', (d) => ytdlpOutBytes += d.length);
-  ytdlp.stderr.on('data', (d) => ytdlpErr += d.toString());
+  const clientArg = client || 'android';
+  const args = [
+    '-v',
+    '--no-playlist',
+    '--extractor-args', `youtube:player_client=${clientArg}`,
+    '-g',
+    '-f', 'bestaudio/ba/b',
+    url,
+  ];
+
+  const ytdlp = spawn('yt-dlp', args, { windowsHide: true });
+  ytdlp.stdout.on('data', (d) => (ytdlpOut += d.toString()));
+  ytdlp.stderr.on('data', (d) => (ytdlpErr += d.toString()));
 
   const timeout = setTimeout(() => {
     try { ytdlp.kill(); } catch (e) {}
-    res.json({ status: 'timeout', ytdlpOutBytes, ytdlpErr: ytdlpErr.slice(-1000) });
-  }, 10000);
+    res.json({ status: 'timeout', client: clientArg, ytdlpOut, ytdlpErr: ytdlpErr.slice(-3000) });
+  }, 20000);
 
   ytdlp.on('close', (code) => {
     clearTimeout(timeout);
     res.json({
       status: 'closed',
       code,
-      ytdlpOutBytes,
-      ytdlpErr: ytdlpErr.slice(-2000),
+      client: clientArg,
+      ytdlpOut,
+      ytdlpErr: ytdlpErr.slice(-3000),
     });
   });
 }
