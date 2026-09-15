@@ -287,12 +287,14 @@ async function streamAudio(rawId, res) {
   const templatePath = path.join(CACHE_DIR, `${videoId}.%(ext)s`);
 
   const downloadPromise = new Promise((resolve, reject) => {
+    const cookieArgs = getCookieArgs();
     const args = [
       '--no-warnings',
       '--no-playlist',
-      ...getCookieArgs(),
+      ...cookieArgs,
       '--js-runtimes', 'node',
-      '--extractor-args', 'youtube:player_client=android,web',
+      ...(cookieArgs.length > 0 ? [] : ['--extractor-args', 'youtube:player_client=android,web']),
+      '-f', 'ba/ba*/bestaudio/best',
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '192K',
